@@ -1,0 +1,11 @@
+{
+  "name": "opencode-sessions-sidebar",
+  "version": "0.2.0",
+  "description": "TUI sidebar section: recent-7-days sessions across all projects (scrollable)",
+  "type": "module",
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.0",
+    "@opentui/solid": ">=0.5.0",
+    "solid-js": ">=1.9.0"
+  }
+}
