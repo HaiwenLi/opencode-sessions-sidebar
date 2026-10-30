@@ -1,6 +1,6 @@
 {
   "name": "opencode-sessions-sidebar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TUI sidebar section: recent-7-days sessions across all projects (scrollable)",
   "type": "module",
   "peerDependencies": {

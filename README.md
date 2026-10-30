@@ -11,7 +11,7 @@ with live updates as sessions change.
   - **Digest** — session title, falling back to the first user message or project name
   - **Full session id** (`ses_…`, 30 chars) — copy-paste ready for `sessions_read` / `sessions_rename`
 - Scroll with `ctrl+↑↓` or mouse wheel
-- Height adapts to the window; colors follow the host theme
+- Fixed-height list (12 rows, scrolls internally); colors follow the host theme
 
 ## Requirements
 
@@ -39,7 +39,7 @@ Add the plugin path (relative to your opencode config) to the `plugins` array in
 {
   "$schema": "https://opencode.ai/v2/cli.json",
   "plugins": [
-    "tui-plugins/opencode-sessions-sidebar"
+    "./tui-plugins/opencode-sessions-sidebar"
   ]
 }
 ```
@@ -72,6 +72,10 @@ plugin was likely skipped at resolution — see the troubleshooting notes below.
 
 ## Implementation notes / known traps
 
+- The `cli.json` `plugins` entry **must start with `./`** (or `../`, an absolute
+  path, or `file://`). A bare relative path like `tui-plugins/...` is parsed as a
+  GitHub git shorthand (`github.com/tui-plugins/...`), and the host fails with
+  `NpmInstallFailedError` at `stage=prepare` after ~5s.
 - `package.json` must **not** have an `exports` field — the host self-references
   `<name>/tui` and silently skips the plugin if resolution fails. The entry must
   be the package-root `tui.js`.

@@ -3,7 +3,7 @@
 // Sidebar section (rendered after the built-in Context/MCP contributions):
 // every session from the last 7 days across ALL projects, newest first.
 //
-// Layout (per Kevin's spec, 2026-10-27): two lines per session + a blank
+// Layout (spec 2026-10-27): two lines per session + a blank
 // separator line between sessions.
 //   line 1: the digest (session title, or the first user message) — pure white
 //   line 2: the FULL session id, left-aligned with the digest — light gray
@@ -58,11 +58,16 @@ const SECONDS = 1000
 const DAYS = 7
 const MAX_ROWS = 200
 const REFRESH_MS = 60 * SECONDS
-const MIN_LIST_HEIGHT = 3
-const FALLBACK_LIST_HEIGHT = 12
-const FALLBACK_WIDTH = 36
-const HEADER_ROWS = 1
-const HINT_ROWS = 1
+// Fixed geometry (v8): the section no longer measures the host's render
+// tree — that walk never found the real viewport (the scrollbox viewport is
+// not in the parent chain), produced wrong heights, and re-measured on every
+// scroll, resizing the list mid-scroll and overlapping neighboring sections.
+// The builtin contract: plain content-sized root box, one leaf scrollbox
+// with an explicit height (scrollboxes clip; plain boxes do not).
+const LIST_HEIGHT = 12
+// Sidebar 42 cols − root padding (2+2) − slot box paddingRight 1 − the
+// scrollbox content paddingRight 1 = 36 usable text columns.
+const LIST_WIDTH = 36
 
 // ---------------------------------------------------------------- data layer
 
@@ -285,7 +290,7 @@ function plainBody(rows, width) {
 
 // Styled body: per session a white digest line, then the full session id
 // light gray on its own line, left-aligned, then a blank separator line
-// (Kevin 2026-10-27: no separator felt cramped once the digest went pure
+// (2026-10-27: no separator felt cramped once the digest went pure
 // white — with strong group anchors the blank line reads as normal list
 // spacing). All in ONE text element — the chunk array is rebuilt wholesale
 // on every refresh, so the element tree itself never changes.
@@ -331,71 +336,6 @@ function createState(context, initial) {
   }
 }
 
-// ---------------------------------------------------------------- layout
-
-// The host renders `sidebar.content` inside a scrollbox that fills the
-// sidebar column (flexGrow 1, minHeight 0), and that scrollbox's viewport is
-// the space the sidebar section may occupy. Everything is read from the live
-// render tree rather than guessed, so the list follows the window.
-//
-// Layout of our own section:
-//
-//   header text            1 row
-//   scrollbox (the list)   N rows
-//   hint text              1 row
-//
-// so the list gets (viewport height - our offset - 2). Sizing the section to
-// exactly the remaining space also keeps the host's outer scrollbar from
-// appearing: its content then exactly fills the viewport.
-function measureAvailable(root) {
-  const fallback = { width: FALLBACK_WIDTH, height: FALLBACK_LIST_HEIGHT }
-
-  try {
-    // Walk up to the host's scroll viewport. The host's scrollbox exposes
-    // viewport/content/scrollTop; our own inner scrollbox is a descendant,
-    // never an ancestor, so this finds the host's one.
-    let node = root
-    let host = null
-    while (node) {
-      if (node.viewport && node.content && typeof node.scrollTop === "number") {
-        host = node
-        break
-      }
-      node = node.parent
-    }
-    if (!host) return fallback
-
-    const viewport = host.viewport
-    const vpLayout = viewport.getComputedLayout?.()
-    if (!vpLayout || !(vpLayout.height > 0)) return fallback
-
-    // Our offset from the top of the viewport: sum the parent-relative tops
-    // of our section and of every ancestor up to the viewport.
-    let offset = 0
-    let cursor = root
-    while (cursor) {
-      const parent = cursor.parent
-      offset += cursor.getComputedLayout?.().top ?? 0
-      if (!parent || parent === viewport) break
-      cursor = parent
-    }
-
-    const available = Math.floor(vpLayout.height - offset)
-    if (available <= 0) return fallback
-
-    // The usable text width is our own width, not the viewport's: the host
-    // wraps the slot in a box with paddingRight 1 that reserves the column
-    // for the host's own scrollbar.
-    const own = root.getComputedLayout?.()
-    const width = own && own.width > 0 ? Math.floor(own.width) : Math.floor(vpLayout.width)
-
-    return { width: Math.max(20, width), height: Math.max(MIN_LIST_HEIGHT, available - HEADER_ROWS - HINT_ROWS) }
-  } catch {
-    // Measurement is best-effort; the fallbacks keep the section usable.
-    return fallback
-  }
-}
-
 // ---------------------------------------------------------------- rendering
 
 let scrollBox
@@ -406,7 +346,7 @@ function buildSection(context, state) {
   const fgMuted = theme?.text?.muted
   const fgError = theme?.text?.feedback?.error?.base ?? fgMuted
 
-  // Visual hierarchy (Kevin-accepted wording: "digest white, id light gray"):
+  // Visual hierarchy (accepted wording: "digest white, id light gray"):
   // terminals have ONE cell size (no font-size props on text renderables),
   // so the hierarchy is carried by color/brightness alone.
   //   header : bold, theme base
@@ -423,11 +363,11 @@ function buildSection(context, state) {
   const idColor = mutedPacked && bgPacked ? blend(mutedPacked, bgPacked, 0.35) : mutedPacked
   if (idColor) idStyle.fg = idColor
 
+  // Builtin contract (v8): the section root is a plain content-sized box —
+  // no width/height/flexGrow/alignSelf (flexGrow is inert under the host's
+  // unconstrained scroll content, and "100%" resolves against an undefined
+  // parent height). Height lives ONLY on the leaf scrollbox, which clips.
   const root = createElement("box")
-  setProp(root, "flexDirection", "column", undefined)
-  setProp(root, "width", "100%", undefined)
-  setProp(root, "alignSelf", "flex-start", undefined)
-  setProp(root, "flexShrink", 0, undefined)
 
   const header = createElement("text")
   setProp(header, "fg", fgBase, undefined)
@@ -435,8 +375,10 @@ function buildSection(context, state) {
   insertNode(root, header)
 
   const list = createElement("scrollbox")
-  setProp(list, "flexGrow", 1, undefined)
-  setProp(list, "minHeight", 0, undefined)
+  // Fixed height on the scrollbox itself: scrollboxes clip to their
+  // viewport, plain boxes do not — an unclipped list paints over the
+  // sections below it.
+  setProp(list, "height", LIST_HEIGHT, undefined)
   setProp(list, "focusable", true, undefined)
   // The host's own sidebar scrollbar is absolutely positioned so it never
   // steals a column; do the same here and reserve the column on the content
@@ -463,32 +405,12 @@ function buildSection(context, state) {
   setProp(hint, "fg", fgMuted, undefined)
   insertNode(root, hint)
 
-  // Measure the space the host gives us, then keep it in sync. The geometry
-  // only exists after the host has laid the section out, and it changes when
-  // the window is resized or when a section above us grows.
-  let measured = { width: FALLBACK_WIDTH, height: FALLBACK_LIST_HEIGHT }
-  let pending = null
-  const applyMeasured = () => {
-    const next = measureAvailable(root)
-    if (next.width === measured.width && next.height === measured.height) return
-    measured = next
-    setProp(list, "height", next.height, undefined)
-    state.patch({ width: next.width })
-  }
-  const scheduleMeasure = () => {
-    if (pending) return
-    pending = setTimeout(() => {
-      pending = null
-      applyMeasured()
-    }, 0)
-  }
-
   effect(() => {
     const data = state.get()
     const rows = data.rows ?? []
     const count = rows.length
     const total = data.total ?? count
-    const width = data.width ?? measured.width
+    const width = LIST_WIDTH
     const scope = total > count ? `${count}/${total}` : `${count}`
     setProp(header, "content", `SESSIONS · ${DAYS}D (${scope})`, undefined)
     // solid's setProp stringifies non-string content, so the styled body is
@@ -513,18 +435,9 @@ function buildSection(context, state) {
     }
   })
 
-  // Re-measure whenever the layout changes: a window resize, or a section
-  // above us (Context, MCP, ...) changing height.
-  try {
-    context.renderer?.root?.on?.("layout-changed", scheduleMeasure)
-  } catch {}
-  try {
-    context.renderer?.on?.("resize", scheduleMeasure)
-  } catch {}
-
-  // First measurement: the layout does not exist until the host has
-  // rendered the section at least once.
-  scheduleMeasure()
+  // No layout-changed/resize listeners (v8): the section has fixed
+  // geometry, so nothing needs re-measuring when the window or neighboring
+  // sections change size.
 
   return root
 }
