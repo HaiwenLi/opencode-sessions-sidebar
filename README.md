@@ -11,7 +11,7 @@ with live updates as sessions change.
   - **Digest** — session title, falling back to the first user message or project name
   - **Full session id** (`ses_…`, 30 chars) — copy-paste ready for `sessions_read` / `sessions_rename`
 - Scroll with `ctrl+↑↓` or mouse wheel
-- Fixed-height list (12 rows, scrolls internally); colors follow the host theme
+- Fixed-height list (12 rows by default, scrolls internally); colors follow the host theme
 
 ## Requirements
 
@@ -49,6 +49,38 @@ Add the plugin path (relative to your opencode config) to the `plugins` array in
 
 Then start `opencode` (TUI) — you should see `SESSIONS · 7D` in the right sidebar,
 below the built-in Context / MCP sections.
+
+## Configuration (optional)
+
+Defaults reproduce the verified layout — nothing to set. Installs differ
+(machine, terminal size, opencode version), so every knob has an env override:
+
+| Env | Default | Purpose |
+| --- | --- | --- |
+| `SESSIONS_SIDEBAR_DAYS` | `7` | Lookback window in days |
+| `SESSIONS_SIDEBAR_MAX` | `200` | Max sessions queried |
+| `SESSIONS_SIDEBAR_HEIGHT` | `12` | Visible list rows (scrolls internally) |
+| `SESSIONS_SIDEBAR_WIDTH` | auto | Text columns for clipping. Auto-detected from the sidebar's real width; setting it pins the value |
+| `SESSIONS_SIDEBAR_DB` | auto | Explicit `opencode.db` path (skips discovery — portable/symlinked/second installs) |
+
+Data-layer robustness across machines is automatic:
+
+- The DB is discovered via `XDG_DATA_HOME`, then `HOME` / `USERPROFILE` /
+  `os.homedir()` → `~/.local/share/opencode/opencode.db`.
+- A DB storing `time_updated` in unix seconds (older opencode builds) is
+  detected automatically, so the lookback window never silently empties.
+- A machine with no DB yet (fresh install) shows an actionable hint instead
+  of a raw sqlite error.
+
+## Updating an existing install
+
+```sh
+git -C ~/.config/opencode/tui-plugins/opencode-sessions-sidebar pull --ff-only
+```
+
+Then restart the TUI. On every machine the workflow is the same: clone once,
+register in `cli.json` once, `git pull` to update — the `plugins` entry lives
+in per-machine config and survives plugin updates.
 
 ## Verify it loaded
 

@@ -1,16 +1,17 @@
-// opencode-sessions-sidebar — TUI part (v7)
+// opencode-sessions-sidebar — TUI part (v0.4)
 //
 // Sidebar section (rendered after the built-in Context/MCP contributions):
 // every session from the last 7 days across ALL projects, newest first.
 //
 // Layout (spec 2026-10-27): two lines per session + a blank
 // separator line between sessions.
-//   line 1: the digest (session title, or the first user message) — pure white
+//   line 1: the digest (session title, or the first user message) — theme
+//           base at full brightness
 //   line 2: the FULL session id, left-aligned with the digest — light gray
 //           (muted blended toward the background + DIM), copy-pasteable
 //           straight into sessions_read / sessions_rename
-// The list is as tall as the space the host's sidebar leaves over, so a
-// taller window shows more sessions, and it scrolls internally.
+// The list is a fixed-height window (12 rows by default, SESSIONS_SIDEBAR_
+// HEIGHT) that scrolls internally — it never measures the host's tree.
 //
 // Data     : bun:sqlite, read-only on opencode.db. The live table is
 //            `session_v2`; `session` is the legacy v1 table (fallback).
@@ -55,8 +56,23 @@ const { TextAttributes, StyledText } = OpenTUI
 const { createElement, insertNode, setProp, effect } = OTSolid
 
 const SECONDS = 1000
-const DAYS = 7
-const MAX_ROWS = 200
+
+// Multi-machine support (v0.4): installs differ — terminal sizes, opencode
+// versions, data locations — so every tunable has an env override. Defaults
+// reproduce the verified layout; zero configuration is required.
+//   SESSIONS_SIDEBAR_DAYS     lookback window in days              (7)
+//   SESSIONS_SIDEBAR_MAX      max sessions queried                 (200)
+//   SESSIONS_SIDEBAR_HEIGHT   visible list rows                    (12)
+//   SESSIONS_SIDEBAR_WIDTH    clip budget in columns; pinning this
+//                             also disables width auto-detection    (36/auto)
+//   SESSIONS_SIDEBAR_DB       explicit opencode.db path (skips discovery)
+function envInt(name, fallback) {
+  const v = Number.parseInt(process.env[name] ?? "", 10)
+  return v > 0 ? v : fallback
+}
+
+const DAYS = envInt("SESSIONS_SIDEBAR_DAYS", 7)
+const MAX_ROWS = envInt("SESSIONS_SIDEBAR_MAX", 200)
 const REFRESH_MS = 60 * SECONDS
 // Fixed geometry (v8): the section no longer measures the host's render
 // tree — that walk never found the real viewport (the scrollbox viewport is
@@ -64,18 +80,30 @@ const REFRESH_MS = 60 * SECONDS
 // scroll, resizing the list mid-scroll and overlapping neighboring sections.
 // The builtin contract: plain content-sized root box, one leaf scrollbox
 // with an explicit height (scrollboxes clip; plain boxes do not).
-const LIST_HEIGHT = 12
+const LIST_HEIGHT = envInt("SESSIONS_SIDEBAR_HEIGHT", 12)
 // Sidebar 42 cols − root padding (2+2) − slot box paddingRight 1 − the
-// scrollbox content paddingRight 1 = 36 usable text columns.
-const LIST_WIDTH = 36
+// scrollbox content paddingRight 1 = 36 usable text columns. Used until a
+// real measurement arrives (see the width watch in buildSection); an
+// explicit SESSIONS_SIDEBAR_WIDTH both sets it and pins it.
+const WIDTH_PINNED = Number.parseInt(process.env["SESSIONS_SIDEBAR_WIDTH"] ?? "", 10)
+const LIST_WIDTH = WIDTH_PINNED > 0 ? WIDTH_PINNED : 36
 
 // ---------------------------------------------------------------- data layer
 
 let db
 let dbTable
+// time_updated unit: opencode stores epoch milliseconds, but a DB written by
+// an older build may hold unix seconds — comparing an ms cutoff against
+// seconds silently empties (or freezes) the list. Detected once, by
+// magnitude: any ms-epoch timestamp is >= ~10^12.
+let dbTimeScale = 1
 let lastError = ""
 
 function dbCandidates() {
+  const out = []
+  // Explicit override first: unusual installs (portable, symlinked, or a
+  // second opencode instance) may keep the DB anywhere.
+  if (process.env.SESSIONS_SIDEBAR_DB) out.push(process.env.SESSIONS_SIDEBAR_DB)
   const homes = []
   if (process.env.HOME) homes.push(process.env.HOME)
   if (process.env.USERPROFILE) homes.push(process.env.USERPROFILE)
@@ -83,7 +111,6 @@ function dbCandidates() {
     const h = homedir()
     if (h) homes.push(h)
   } catch {}
-  const out = []
   const xdg = process.env.XDG_DATA_HOME
   if (xdg) out.push(`${xdg}/opencode/opencode.db`)
   for (const h of homes) out.push(`${h}/.local/share/opencode/opencode.db`)
@@ -93,13 +120,23 @@ function dbCandidates() {
 function openDb() {
   if (db) return db
   const candidates = dbCandidates()
-  const path = candidates.find((c) => existsSync(c)) ?? candidates[0]
+  const path = candidates.find((c) => existsSync(c))
+  if (!path) {
+    // Not a plugin failure: a machine where the TUI has never written its
+    // DB yet (fresh install) legitimately has no file. Say what to do
+    // instead of leaking a raw sqlite open error.
+    throw new Error("no opencode.db (fresh install?) - set SESSIONS_SIDEBAR_DB")
+  }
   db = new Database(path, { readonly: true })
   const names = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_v2','session')")
     .all()
     .map((r) => r.name)
   dbTable = names.includes("session_v2") ? "session_v2" : names.includes("session") ? "session" : "session_v2"
+  try {
+    const probe = db.prepare(`SELECT MAX(time_updated) AS m FROM ${dbTable}`).get()
+    if (probe && Number(probe.m) > 0 && Number(probe.m) < 1e12) dbTimeScale = 1000
+  } catch {}
   return db
 }
 
@@ -111,7 +148,7 @@ const FALLBACK_TITLE = /^(New|Child) session - \d{4}-\d{2}-\d{2}T/
 
 function loadSessions() {
   try {
-    const cutoff = Date.now() - DAYS * 86400 * SECONDS
+    const cutoff = (Date.now() - DAYS * 86400 * SECONDS) / dbTimeScale
     const conn = openDb()
     const rows = conn
       .prepare(
@@ -339,6 +376,7 @@ function createState(context, initial) {
 // ---------------------------------------------------------------- rendering
 
 let scrollBox
+let stopWidthWatch = null
 
 function buildSection(context, state) {
   const theme = context.theme ?? {}
@@ -410,7 +448,7 @@ function buildSection(context, state) {
     const rows = data.rows ?? []
     const count = rows.length
     const total = data.total ?? count
-    const width = LIST_WIDTH
+    const width = data.width ?? LIST_WIDTH
     const scope = total > count ? `${count}/${total}` : `${count}`
     setProp(header, "content", `SESSIONS · ${DAYS}D (${scope})`, undefined)
     // solid's setProp stringifies non-string content, so the styled body is
@@ -435,9 +473,46 @@ function buildSection(context, state) {
     }
   })
 
-  // No layout-changed/resize listeners (v8): the section has fixed
-  // geometry, so nothing needs re-measuring when the window or neighboring
-  // sections change size.
+  // Geometry stays fixed (v8): the host tree is never measured for height.
+  // v0.4 tracks exactly one dynamic value — the list's OWN computed width —
+  // because another opencode version may size the sidebar differently. It
+  // is read locally on our element (never by walking the parent chain,
+  // which was the v7 bug), feeds only the clipping budget (never
+  // geometry), and patches state solely when the value changes, so it
+  // cannot feed back into layout. An explicit SESSIONS_SIDEBAR_WIDTH
+  // disables the watch entirely.
+  if (!(WIDTH_PINNED > 0) && !stopWidthWatch) {
+    const measure = () => {
+      const box = scrollBox
+      if (!box) return
+      try {
+        const w = Math.floor(box.getComputedLayout?.()?.width ?? 0)
+        // contentOptions paddingRight 1: one column is padding, not text
+        const usable = w - 1
+        if (usable >= 10 && state.get().width !== usable) state.patch({ width: usable })
+      } catch {}
+    }
+    const stops = []
+    const watch = (emitter, event) => {
+      try {
+        const off = emitter?.on?.(event, measure)
+        if (typeof off === "function") stops.push(off)
+      } catch {}
+    }
+    watch(context.renderer?.root, "layout-changed")
+    watch(context.renderer, "resize")
+    const probe = setTimeout(measure, 0)
+    stops.push(() => clearTimeout(probe))
+    stopWidthWatch = () => {
+      for (const stop of stops) {
+        try {
+          stop()
+        } catch {}
+      }
+      stops.length = 0
+      stopWidthWatch = null
+    }
+  }
 
   return root
 }
@@ -481,14 +556,21 @@ function attachKeyScroll(context) {
 export default {
   id: "sessions-sidebar",
   setup(context) {
-    const state = createState(context, loadSessions())
+    const initial = loadSessions()
+    initial.width = LIST_WIDTH
+    const state = createState(context, initial)
 
     let pending = null
+    // patch (not set): a width detected between refreshes must survive them
+    const applyRows = () => {
+      const { rows, total } = loadSessions()
+      state.patch({ rows, total })
+    }
     const refresh = () => {
       if (pending) return
       pending = setTimeout(() => {
         pending = null
-        state.set(loadSessions())
+        applyRows()
       }, 500)
     }
 
@@ -498,7 +580,7 @@ export default {
         stops.push(context.data.on(type, refresh))
       } catch {}
     }
-    const timer = setInterval(() => state.set(loadSessions()), REFRESH_MS)
+    const timer = setInterval(applyRows, REFRESH_MS)
 
     attachKeyScroll(context)
 
@@ -520,6 +602,9 @@ export default {
     return () => {
       clearInterval(timer)
       if (pending) clearTimeout(pending)
+      try {
+        stopWidthWatch?.()
+      } catch {}
       for (const stop of stops) {
         try {
           stop?.()
